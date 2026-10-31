@@ -1,0 +1,25 @@
+name: VideoPlaylist
+options:
+  bundleIdPrefix: com.george
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  VideoPlaylist:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Config/Info.plist
+      properties:
+        CFBundleDisplayName: Playlist
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.george.videoplaylist
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
