@@ -27,6 +27,8 @@ struct VideoPlaylistApp: App {
                         .environmentObject(store)
                         .environmentObject(coordinator)
                 }
+                .preferredColorScheme(.dark)
+                .tint(Theme.accent)
         }
     }
 }

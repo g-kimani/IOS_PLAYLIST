@@ -68,13 +68,18 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Shuffles everything after the current video. Watched videos and the current one stay put.
-    func shuffleRemaining(for id: UUID) {
+    /// Shuffles the queue from the current position onward, including the current video,
+    /// and guarantees a different video lands in the current slot. Watched videos stay put.
+    func shuffleFromCurrent(for id: UUID) {
         mutate(id) { s in
-            let start = s.position + 1
-            guard start < s.queue.count else { return }
-            let shuffled = Array(s.queue[start...]).shuffled()
-            s.queue.replaceSubrange(start..<s.queue.count, with: shuffled)
+            guard s.queue.count - s.position > 1 else { return }
+            let currentID = s.queue[s.position].id
+            var tail = Array(s.queue[s.position...])
+            tail.shuffle()
+            if tail[0].id == currentID {
+                tail.swapAt(0, Int.random(in: 1..<tail.count))
+            }
+            s.queue.replaceSubrange(s.position..<s.queue.count, with: tail)
         }
     }
 

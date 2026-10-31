@@ -11,7 +11,8 @@ struct SessionView: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        Group {
+        ZStack {
+            AppBackground()
             if let session = store.session(sessionID) {
                 content(session)
             } else {
@@ -35,74 +36,94 @@ struct SessionView: View {
     }
 
     private func content(_ session: Session) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
                 Text(session.name)
-                    .font(.largeTitle.weight(.regular))
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
                     .lineLimit(1)
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: "xmark").foregroundColor(.red)
-                        Text("close").font(.caption2)
-                    }
-                }
-                .buttonStyle(.plain)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 8)
+                IconButton(systemName: "xmark", size: 40) { dismiss() }
             }
 
             HStack(spacing: 12) {
-                Button("Play") { coordinator.play(session.id) }
-                    .disabled(session.queue.isEmpty)
-                Button("Add") { showPicker = true }
-                Button("Delete", role: .destructive) { confirmDelete = true }
-            }
-            .buttonStyle(.bordered)
+                Button {
+                    coordinator.play(session.id)
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .background(Capsule().fill(Theme.gradient))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PressableStyle())
+                .disabled(session.queue.isEmpty)
+                .opacity(session.queue.isEmpty ? 0.4 : 1)
 
-            Text("QUEUE  ( \(session.positionLabel) )")
-                .font(.title3)
+                IconButton(systemName: "plus", size: 50) { showPicker = true }
+                IconButton(systemName: "trash", size: 50, tint: Theme.danger) { confirmDelete = true }
+            }
+
+            HStack {
+                Text("QUEUE")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundColor(.white.opacity(0.6))
+                Spacer()
+                Badge(text: session.positionLabel)
+            }
 
             if session.queue.isEmpty {
-                Text("The queue is empty. Tap Add to pick some videos.")
-                    .foregroundColor(.secondary)
+                VStack(spacing: 10) {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 36))
+                        .foregroundStyle(Theme.gradient)
+                    Text("Your queue is empty")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.55))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 40)
                 Spacer()
             } else {
                 queueList(session)
             }
         }
-        .padding()
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 
     private func queueList(_ session: Session) -> some View {
-        List {
-            ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
-                HStack(spacing: 10) {
-                    Text("\(index + 1)")
-                        .foregroundColor(.secondary)
-                        .frame(width: 34, alignment: .trailing)
-                    Button {
-                        store.setPosition(index, for: session.id)
-                        coordinator.play(session.id)
-                    } label: {
-                        Text(item.name)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
+                        QueueRow(
+                            index: index,
+                            item: item,
+                            isCurrent: index == session.position,
+                            isPast: index < session.position,
+                            showDelete: true,
+                            onTap: {
+                                store.setPosition(index, for: session.id)
+                                coordinator.play(session.id)
+                            },
+                            onDelete: {
+                                store.removeItem(at: index, from: session.id)
+                            }
+                        )
+                        .id(item.id)
                     }
-                    .buttonStyle(.plain)
-                    Button {
-                        store.removeItem(at: index, from: session.id)
-                    } label: {
-                        Image(systemName: "xmark").foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
                 }
-                // Videos before the current position are greyed out but still tappable.
-                .opacity(index < session.position ? 0.4 : 1)
-                .listRowBackground(index == session.position ? Color.accentColor.opacity(0.15) : nil)
+                .padding(.bottom, 24)
+            }
+            .onAppear {
+                if session.queue.indices.contains(session.position) {
+                    proxy.scrollTo(session.queue[session.position].id, anchor: .center)
+                }
             }
         }
-        .listStyle(.plain)
     }
 }

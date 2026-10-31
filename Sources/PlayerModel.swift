@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 
 final class PlayerModel: ObservableObject {
@@ -14,6 +15,7 @@ final class PlayerModel: ObservableObject {
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var statusCancellable: AnyCancellable?
     private var accessedURL: URL?
 
     init(sessionID: UUID, store: SessionStore) {
@@ -32,8 +34,14 @@ final class PlayerModel: ObservableObject {
             if let d = self.player.currentItem?.duration.seconds, d.isFinite, d > 0 {
                 self.duration = d
             }
-            self.isPlaying = self.player.timeControlStatus != .paused
         }
+
+        // Keeps the play/pause icon in sync even while paused.
+        statusCancellable = player.publisher(for: \.timeControlStatus)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                self?.isPlaying = (status != .paused)
+            }
 
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -129,8 +137,11 @@ final class PlayerModel: ObservableObject {
         if player.timeControlStatus != .paused { player.rate = rate }
     }
 
-    /// In-place shuffle of everything after the current video. The current video keeps playing.
+    /// Shuffles the queue from the current position (current video included)
+    /// and switches straight to whichever video lands in the current slot.
     func shuffle() {
-        store.shuffleRemaining(for: sessionID)
+        guard let s = session, s.queue.count - s.position > 1 else { return }
+        store.shuffleFromCurrent(for: sessionID)
+        loadCurrent()
     }
 }

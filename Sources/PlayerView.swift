@@ -42,17 +42,26 @@ struct PlayerView: View {
             Color.black.ignoresSafeArea()
             PlayerLayerView(player: model.player).ignoresSafeArea()
 
-            // Tap anywhere on the video to show/hide the overlay.
+            // Tap anywhere on the video to show/hide the controls.
             Color.clear
                 .contentShape(Rectangle())
                 .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.2)) { showOverlay.toggle() }
-                    poke()
-                }
+                .onTapGesture { toggleOverlay() }
 
-            if showOverlay { overlay.transition(.opacity) }
-            if showQueue { queuePanel.transition(.move(edge: .trailing)) }
+            // GeometryReader tells us whether we're in portrait or landscape,
+            // so the layout re-flows when the phone rotates.
+            GeometryReader { geo in
+                let portrait = geo.size.height > geo.size.width
+                ZStack {
+                    if showOverlay {
+                        overlay(portrait: portrait).transition(.opacity)
+                    }
+                    if showQueue {
+                        queuePanel(portrait: portrait, size: geo.size).transition(.opacity)
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
         }
         .environment(\.colorScheme, .dark)
         .statusBarHidden(true)
@@ -66,154 +75,207 @@ struct PlayerView: View {
 
     // MARK: - Overlay
 
-    private var overlay: some View {
+    private func overlay(portrait: Bool) -> some View {
         ZStack {
-            Color.black.opacity(0.45)
+            // Tapping empty space hides the controls again.
+            Color.black.opacity(0.15)
                 .ignoresSafeArea()
-                .onTapGesture { withAnimation { showOverlay = false } }
+                .onTapGesture { hideOverlay() }
 
-            VStack {
-                topBar
+            VStack(spacing: 0) {
+                LinearGradient(colors: [Color.black.opacity(0.75), Color.clear],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 150)
+                Spacer()
+                LinearGradient(colors: [Color.clear, Color.black.opacity(0.85)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: portrait ? 300 : 190)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
+                topBar(portrait: portrait)
                 Spacer()
                 if let err = model.errorText {
                     Text(err)
+                        .font(.callout)
                         .foregroundColor(.yellow)
                         .multilineTextAlignment(.center)
+                        .padding(14)
+                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.black.opacity(0.65)))
+                        .padding(.horizontal, 24)
                 }
                 Spacer()
-                bottomBar
+                bottomBar(portrait: portrait)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
     }
 
-    private var topBar: some View {
-        HStack {
-            Button {
+    private func topBar(portrait: Bool) -> some View {
+        HStack(spacing: 12) {
+            IconButton(systemName: "xmark", size: 44, tint: Theme.danger) {
                 coordinator.active = nil
-            } label: {
-                Image(systemName: "xmark").font(.title2.bold()).foregroundColor(.red)
             }
-            Spacer()
-            Text(titleText).font(.headline).lineLimit(1)
-            Spacer()
-            Image(systemName: "xmark").font(.title2.bold()).opacity(0) // balances the close button
+            Text(titleText)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundColor(.white)
+                .lineLimit(portrait ? 2 : 1)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+            Color.clear.frame(width: 44, height: 44) // balances the close button
         }
     }
 
-    private var bottomBar: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Text(format(scrubbing ? scrubValue : model.currentTime))
-                    .font(.caption).monospacedDigit()
-                Slider(
-                    value: Binding(
-                        get: { scrubbing ? scrubValue : model.currentTime },
-                        set: { scrubValue = $0 }
-                    ),
-                    in: 0...max(model.duration, 1),
-                    onEditingChanged: { editing in
-                        if editing { scrubValue = model.currentTime }
-                        scrubbing = editing
-                        if !editing { model.seek(to: scrubValue) }
-                        poke()
-                    }
-                )
-                Text(format(model.duration))
-                    .font(.caption).monospacedDigit()
-            }
+    private func bottomBar(portrait: Bool) -> some View {
+        VStack(spacing: portrait ? 16 : 8) {
+            scrubber
 
-            HStack(spacing: 24) {
-                Button { model.togglePlay(); poke() } label: {
-                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").font(.title)
+            if portrait {
+                // Portrait: transport controls centred on one row,
+                // speed / shuffle / queue on the row below.
+                HStack(spacing: 36) {
+                    IconButton(systemName: "backward.fill", size: 50) { model.previous(); poke() }
+                    playPauseButton(size: 66)
+                    IconButton(systemName: "forward.fill", size: 50) { model.next(); poke() }
                 }
-                Button { model.previous(); poke() } label: {
-                    Image(systemName: "backward.fill").font(.title2)
+                HStack {
+                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.5); poke() }
+                    Spacer()
+                    rateBadge
+                    Spacer()
+                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.5); poke() }
+                    Spacer()
+                    IconButton(systemName: "shuffle") { model.shuffle(); poke() }
+                    Spacer()
+                    IconButton(systemName: "list.bullet") { openQueue() }
                 }
-                Button { model.next(); poke() } label: {
-                    Image(systemName: "forward.fill").font(.title2)
-                }
-                Spacer()
-                Text(String(format: "%.1fx", model.rate))
-                    .font(.caption).monospacedDigit()
-                labeled("tortoise.fill", "SLOW") { model.changeRate(by: -0.5) }
-                labeled("hare.fill", "FAST") { model.changeRate(by: 0.5) }
-                labeled("shuffle", "SHUFFLE") { model.shuffle() }
-                labeled("list.bullet", "QUEUE") {
-                    withAnimation { showQueue = true }
+            } else {
+                // Landscape: everything on a single row.
+                HStack(spacing: 12) {
+                    playPauseButton(size: 52)
+                    IconButton(systemName: "backward.fill") { model.previous(); poke() }
+                    IconButton(systemName: "forward.fill") { model.next(); poke() }
+                    Spacer()
+                    rateBadge
+                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.5); poke() }
+                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.5); poke() }
+                    IconButton(systemName: "shuffle") { model.shuffle(); poke() }
+                    IconButton(systemName: "list.bullet") { openQueue() }
                 }
             }
+        }
+    }
+
+    private func playPauseButton(size: CGFloat) -> some View {
+        IconButton(systemName: model.isPlaying ? "pause.fill" : "play.fill", size: size, filled: true) {
+            model.togglePlay()
+            poke()
+        }
+    }
+
+    private var rateBadge: some View {
+        Text(String(format: "%.1fx", model.rate))
+            .font(.caption.monospacedDigit().weight(.bold))
+            .foregroundColor(.white)
+            .frame(minWidth: 40)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.white.opacity(0.14)))
+    }
+
+    private var scrubber: some View {
+        HStack(spacing: 10) {
+            Text(format(scrubbing ? scrubValue : model.currentTime))
+                .font(.caption.monospacedDigit())
+                .frame(minWidth: 44, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { scrubbing ? scrubValue : model.currentTime },
+                    set: { scrubValue = $0 }
+                ),
+                in: 0...max(model.duration, 1),
+                onEditingChanged: { editing in
+                    if editing { scrubValue = model.currentTime }
+                    scrubbing = editing
+                    if !editing { model.seek(to: scrubValue) }
+                    poke()
+                }
+            )
+            .tint(Theme.accent)
+            Text(format(model.duration))
+                .font(.caption.monospacedDigit())
+                .frame(minWidth: 44, alignment: .trailing)
         }
         .foregroundColor(.white)
     }
 
-    private func labeled(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-            poke()
-        } label: {
-            VStack(spacing: 2) {
-                Image(systemName: icon).font(.title2)
-                Text(label).font(.system(size: 10))
-            }
-        }
-    }
+    // MARK: - Queue panel (side panel in landscape, bottom sheet in portrait)
 
-    // MARK: - Queue panel
-
-    private var queuePanel: some View {
-        ZStack(alignment: .trailing) {
-            Color.black.opacity(0.3)
+    private func queuePanel(portrait: Bool, size: CGSize) -> some View {
+        ZStack(alignment: portrait ? .bottom : .trailing) {
+            Color.black.opacity(0.4)
                 .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation { showQueue = false }
-                    poke()
-                }
+                .onTapGesture { closeQueue() }
 
-            VStack(alignment: .leading, spacing: 0) {
-                if let session = store.session(sessionID) {
-                    Text("Queue ( \(session.positionLabel) )")
-                        .font(.headline)
-                        .padding()
-                    queueList(session)
+            if let session = store.session(sessionID) {
+                if portrait {
+                    queueContent(session)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: size.height * 0.58)
+                        .background(panelBackground.ignoresSafeArea(edges: .bottom))
+                } else {
+                    queueContent(session)
+                        .frame(width: min(360, size.width * 0.5))
+                        .frame(maxHeight: .infinity)
+                        .background(panelBackground.ignoresSafeArea())
                 }
             }
-            .frame(width: 320)
-            .frame(maxHeight: .infinity)
-            .background(Color.black.opacity(0.88).ignoresSafeArea())
         }
     }
 
-    private func queueList(_ session: Session) -> some View {
-        ScrollViewReader { proxy in
-            List {
-                ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
-                    Button {
-                        model.jump(to: index)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text("\(index + 1)")
-                                .foregroundColor(.secondary)
-                                .frame(width: 30, alignment: .trailing)
-                            Text(item.name)
-                                .lineLimit(2)
-                                .foregroundColor(index == session.position ? .accentColor : .primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(index < session.position ? 0.4 : 1)
-                    .id(item.id)
-                    .listRowBackground(Color.clear)
-                }
+    private var panelBackground: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color(red: 0.08, green: 0.07, blue: 0.14).opacity(0.96))
+    }
+
+    private func queueContent(_ session: Session) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("Queue")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                Badge(text: session.positionLabel)
+                Spacer()
+                IconButton(systemName: "xmark", size: 34) { closeQueue() }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .onAppear {
-                if session.queue.indices.contains(session.position) {
-                    proxy.scrollTo(session.queue[session.position].id, anchor: .center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
+                            QueueRow(
+                                index: index,
+                                item: item,
+                                isCurrent: index == session.position,
+                                isPast: index < session.position,
+                                onTap: { model.jump(to: index) }
+                            )
+                            .id(item.id)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 16)
+                }
+                .onAppear {
+                    if session.queue.indices.contains(session.position) {
+                        proxy.scrollTo(session.queue[session.position].id, anchor: .center)
+                    }
                 }
             }
         }
@@ -226,13 +288,32 @@ struct PlayerView: View {
         return "\(s.position + 1): \(s.queue[s.position].name)"
     }
 
-    /// Auto-hides the overlay a few seconds after the last interaction.
+    private func toggleOverlay() {
+        withAnimation(.easeInOut(duration: 0.2)) { showOverlay.toggle() }
+        if showOverlay { poke() }
+    }
+
+    private func hideOverlay() {
+        withAnimation(.easeInOut(duration: 0.2)) { showOverlay = false }
+    }
+
+    private func openQueue() {
+        hideTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.2)) { showQueue = true }
+    }
+
+    private func closeQueue() {
+        withAnimation(.easeInOut(duration: 0.2)) { showQueue = false }
+        poke()
+    }
+
+    /// Auto-hides the controls a few seconds after the last interaction.
     private func poke() {
         hideTask?.cancel()
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if !Task.isCancelled && !showQueue && !scrubbing {
-                withAnimation { showOverlay = false }
+                withAnimation(.easeInOut(duration: 0.2)) { showOverlay = false }
             }
         }
     }
