@@ -16,7 +16,7 @@ final class PlayerModel: ObservableObject {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var statusCancellable: AnyCancellable?
-    private var accessedURL: URL?
+    private var accessedURLs: [URL] = []
 
     init(sessionID: UUID, store: SessionStore) {
         self.sessionID = sessionID
@@ -57,15 +57,15 @@ final class PlayerModel: ObservableObject {
     deinit {
         if let timeObserver = timeObserver { player.removeTimeObserver(timeObserver) }
         if let endObserver = endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        accessedURL?.stopAccessingSecurityScopedResource()
+        accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         player.pause()
     }
 
     private var session: Session? { store.session(sessionID) }
 
     func loadCurrent(autoplay: Bool = true) {
-        accessedURL?.stopAccessingSecurityScopedResource()
-        accessedURL = nil
+        accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+        accessedURLs = []
         errorText = nil
         currentTime = 0
         duration = 0
@@ -76,18 +76,17 @@ final class PlayerModel: ObservableObject {
         }
         let item = session.queue[session.position]
 
-        var stale = false
-        guard let url = try? URL(resolvingBookmarkData: item.bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+        guard let resolved = FileResolver.resolve(item, store: store) else {
             player.replaceCurrentItem(with: nil)
             errorText = "Can't open \(item.name). The file may have been moved or deleted."
             return
         }
-        if url.startAccessingSecurityScopedResource() { accessedURL = url }
-        if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+        accessedURLs = resolved.scopedURLs
+        if let fresh = resolved.refreshedBookmark {
             store.updateBookmark(fresh, itemID: item.id, in: sessionID)
         }
 
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        player.replaceCurrentItem(with: AVPlayerItem(url: resolved.url))
         if autoplay { play() }
     }
 

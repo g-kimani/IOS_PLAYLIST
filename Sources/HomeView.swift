@@ -16,6 +16,7 @@ struct HomeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         header
+                        if let notice = store.loadNotice { noticeBanner(notice) }
                         if store.sessions.isEmpty { emptyState }
                         ForEach(store.sessions) { session in
                             SessionCard(
@@ -83,6 +84,17 @@ struct HomeView: View {
             .buttonStyle(PressableStyle())
         }
         .padding(.top, 12)
+    }
+
+    private func noticeBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+            Text(text).font(.footnote)
+            Spacer(minLength: 0)
+            IconButton(systemName: "xmark", size: 30) { store.clearNotice() }
+        }
+        .padding(12)
+        .cardStyle(cornerRadius: 14)
     }
 
     private var emptyState: some View {

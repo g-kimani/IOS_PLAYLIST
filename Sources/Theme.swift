@@ -54,6 +54,30 @@ struct PressableStyle: ButtonStyle {
     }
 }
 
+/// The round icon look, without any tap behaviour (used inside Menus).
+struct CircleIcon: View {
+    let systemName: String
+    var size: CGFloat = 44
+    var tint: Color = .white
+    var filled = false
+
+    var body: some View {
+        ZStack {
+            if filled {
+                Circle().fill(Theme.gradient)
+            } else {
+                Circle().fill(Color.white.opacity(0.10))
+                Circle().stroke(Color.white.opacity(0.14), lineWidth: 1)
+            }
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.4, weight: .semibold))
+                .foregroundColor(filled ? .white : tint)
+        }
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+    }
+}
+
 /// Round icon button with a generous tap target (the whole circle is tappable).
 struct IconButton: View {
     let systemName: String
@@ -64,19 +88,7 @@ struct IconButton: View {
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                if filled {
-                    Circle().fill(Theme.gradient)
-                } else {
-                    Circle().fill(Color.white.opacity(0.10))
-                    Circle().stroke(Color.white.opacity(0.14), lineWidth: 1)
-                }
-                Image(systemName: systemName)
-                    .font(.system(size: size * 0.4, weight: .semibold))
-                    .foregroundColor(filled ? .white : tint)
-            }
-            .frame(width: size, height: size)
-            .contentShape(Circle())
+            CircleIcon(systemName: systemName, size: size, tint: tint, filled: filled)
         }
         .buttonStyle(PressableStyle())
     }
@@ -123,11 +135,19 @@ struct QueueRow: View {
                     }
                     .frame(width: 30, height: 30)
 
-                    Text(item.name)
-                        .font(.subheadline.weight(isCurrent ? .semibold : .regular))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name)
+                            .font(.subheadline.weight(isCurrent ? .semibold : .regular))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        if let folder = item.folder {
+                            Text(folder)
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.45))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.vertical, 10)
                 .padding(.leading, 12)
