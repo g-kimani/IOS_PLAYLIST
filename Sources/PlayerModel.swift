@@ -64,6 +64,9 @@ final class PlayerModel: ObservableObject {
     private var session: Session? { store.session(sessionID) }
 
     func loadCurrent(autoplay: Bool = true) {
+        // Every new item starts at normal speed.
+        rate = 1.0
+        player.defaultRate = 1.0
         accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         accessedURLs = []
         errorText = nil
@@ -131,7 +134,7 @@ final class PlayerModel: ObservableObject {
     }
 
     func changeRate(by delta: Float) {
-        rate = min(max(rate + delta, 0.5), 3.0)
+        rate = min(max(rate + delta, 0.25), 3.0)
         player.defaultRate = rate
         if player.timeControlStatus != .paused { player.rate = rate }
     }
@@ -139,8 +142,8 @@ final class PlayerModel: ObservableObject {
     /// Shuffles the queue from the current position (current video included)
     /// and switches straight to whichever video lands in the current slot.
     func shuffle() {
-        guard let s = session, s.queue.count - s.position > 1 else { return }
-        store.shuffleFromCurrent(for: sessionID)
+        guard let s = session, s.queue.count > 1 else { return }
+        store.probabilityShuffle(for: sessionID)
         loadCurrent()
     }
 }

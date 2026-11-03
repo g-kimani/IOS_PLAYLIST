@@ -28,8 +28,11 @@ struct PlayerView: View {
 
     @State private var showOverlay = false
     @State private var showQueue = false
+    @State private var showFavorites = false
+    @State private var confirmDiskDelete = false
     @State private var scrubbing = false
     @State private var scrubValue: Double = 0
+    @State private var showCountdown = true
     @State private var hideTask: Task<Void, Never>?
 
     init(sessionID: UUID, store: SessionStore) {
@@ -42,11 +45,28 @@ struct PlayerView: View {
             Color.black.ignoresSafeArea()
             PlayerLayerView(player: model.player).ignoresSafeArea()
 
-            // Tap anywhere on the video to show/hide the controls.
-            Color.clear
-                .contentShape(Rectangle())
+            // Three gesture zones remain aligned with the screen after rotation.
+            GeometryReader { zones in
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: zones.size.width / 3)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 1) { toggleOverlay() }
+                        .onTapGesture(count: 2) { model.seek(to: max(model.currentTime - 5, 0)); poke() }
+                        .gesture(DragGesture(minimumDistance: 18).onChanged { value in
+                            UIScreen.main.brightness = min(max(UIScreen.main.brightness - value.translation.height / 700, 0), 1)
+                        })
+                    Color.clear.frame(width: zones.size.width / 3)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 1) { toggleOverlay() }
+                        .onTapGesture(count: 2) { model.togglePlay(); poke() }
+                    Color.clear.frame(width: zones.size.width / 3)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 1) { toggleOverlay() }
+                        .onTapGesture(count: 2) { model.seek(to: min(model.currentTime + 5, model.duration)); poke() }
+                }
                 .ignoresSafeArea()
-                .onTapGesture { toggleOverlay() }
+            }
+            .allowsHitTesting(!showOverlay && !showQueue && !showFavorites)
 
             // GeometryReader tells us whether we're in portrait or landscape,
             // so the layout re-flows when the phone rotates.
@@ -59,6 +79,9 @@ struct PlayerView: View {
                     if showQueue {
                         queuePanel(portrait: portrait, size: geo.size).transition(.opacity)
                     }
+                    if showFavorites {
+                        favoritesPanel(portrait: portrait, size: geo.size).transition(.move(edge: .trailing))
+                    }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
@@ -66,6 +89,12 @@ struct PlayerView: View {
         .environment(\.colorScheme, .dark)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        .alert("Delete video from disk?", isPresented: $confirmDiskDelete) {
+            Button("Delete", role: .destructive) { deleteCurrentVideo() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes the video file, not just the queue entry.")
+        }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -126,7 +155,17 @@ struct PlayerView: View {
                 .lineLimit(portrait ? 2 : 1)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
-            Color.clear.frame(width: 44, height: 44) // balances the close button
+            HStack(spacing: 8) {
+                IconButton(systemName: "doc.on.doc", size: 40) {
+                    UIPasteboard.general.string = store.session(sessionID)?.queue.indices.contains(store.session(sessionID)?.position ?? -1) == true
+                        ? store.session(sessionID)?.queue[store.session(sessionID)!.position].name : titleText
+                    poke()
+                }
+                IconButton(systemName: "folder.badge.star", size: 40) {
+                    showFavorites.toggle()
+                    poke()
+                }
+            }
         }
     }
 
@@ -143,15 +182,16 @@ struct PlayerView: View {
                     IconButton(systemName: "forward.fill", size: 50) { model.next(); poke() }
                 }
                 HStack {
-                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.5); poke() }
+                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
                     Spacer()
                     rateBadge
                     Spacer()
-                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.5); poke() }
+                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
                     Spacer()
                     IconButton(systemName: "shuffle") { model.shuffle(); poke() }
                     Spacer()
                     IconButton(systemName: "list.bullet") { openQueue() }
+                    IconButton(systemName: "trash", tint: Theme.danger) { confirmDiskDelete = true }
                 }
             } else {
                 // Landscape: everything on a single row.
@@ -161,10 +201,11 @@ struct PlayerView: View {
                     IconButton(systemName: "forward.fill") { model.next(); poke() }
                     Spacer()
                     rateBadge
-                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.5); poke() }
-                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.5); poke() }
+                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
+                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
                     IconButton(systemName: "shuffle") { model.shuffle(); poke() }
                     IconButton(systemName: "list.bullet") { openQueue() }
+                    IconButton(systemName: "trash", tint: Theme.danger) { confirmDiskDelete = true }
                 }
             }
         }
@@ -178,13 +219,21 @@ struct PlayerView: View {
     }
 
     private var rateBadge: some View {
-        Text(String(format: "%.1fx", model.rate))
-            .font(.caption.monospacedDigit().weight(.bold))
-            .foregroundColor(.white)
-            .frame(minWidth: 40)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(Color.white.opacity(0.14)))
+        Button {
+            model.rate = 1.0
+            model.player.defaultRate = 1.0
+            if model.player.timeControlStatus != .paused { model.player.rate = 1.0 }
+            poke()
+        } label: {
+            Text(String(format: "%.2fx", model.rate))
+                .font(.caption.monospacedDigit().weight(.bold))
+                .foregroundColor(.white)
+                .frame(minWidth: 44)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.white.opacity(0.14)))
+        }
+        .buttonStyle(.plain)
     }
 
     private var scrubber: some View {
@@ -206,11 +255,61 @@ struct PlayerView: View {
                 }
             )
             .tint(Theme.accent)
-            Text(format(model.duration))
-                .font(.caption.monospacedDigit())
-                .frame(minWidth: 44, alignment: .trailing)
+            Button {
+                showCountdown.toggle()
+                poke()
+            } label: {
+                Text(format(showCountdown ? max(model.duration - (scrubbing ? scrubValue : model.currentTime), 0) : model.duration))
+                    .font(.caption.monospacedDigit())
+                    .frame(minWidth: 44, alignment: .trailing)
+            }
+            .buttonStyle(.plain)
         }
         .foregroundColor(.white)
+    }
+
+    // MARK: - Favourite folders sidebar
+
+    private func favoritesPanel(portrait: Bool, size: CGSize) -> some View {
+        ZStack(alignment: .trailing) {
+            Color.black.opacity(0.45).ignoresSafeArea().onTapGesture { showFavorites = false }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Favourite folders").font(.headline).foregroundColor(.white)
+                    Spacer()
+                    IconButton(systemName: "xmark", size: 34) { showFavorites = false }
+                }
+                Text("Weights influence which folder's videos appear earlier when you shuffle.")
+                    .font(.caption).foregroundColor(.white.opacity(0.6))
+                if store.roots.isEmpty {
+                    Text("Add a library folder to a session first.")
+                        .font(.subheadline).foregroundColor(.white.opacity(0.65))
+                } else {
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            ForEach(store.roots) { root in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text(root.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                        Spacer()
+                                        Text(String(format: "%.1f", root.weight)).font(.caption.monospacedDigit())
+                                    }.foregroundColor(.white)
+                                    Slider(value: Binding(
+                                        get: { root.weight },
+                                        set: { store.setRootWeight($0, for: root.id) }
+                                    ), in: 0...20, step: 0.5).tint(Theme.accent)
+                                }
+                                .padding(12).cardStyle(cornerRadius: 14)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .frame(width: portrait ? min(size.width * 0.88, 380) : min(360, size.width * 0.42), height: size.height)
+            .background(panelBackground.ignoresSafeArea())
+        }
     }
 
     // MARK: - Queue panel (side panel in landscape, bottom sheet in portrait)
@@ -278,6 +377,25 @@ struct PlayerView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func deleteCurrentVideo() {
+        guard let session = store.session(sessionID), session.queue.indices.contains(session.position) else { return }
+        let index = session.position
+        let item = session.queue[index]
+        guard let resolved = FileResolver.resolve(item, store: store) else {
+            model.errorText = "Couldn't locate the video file to delete."
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: resolved.url)
+            resolved.scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+            store.removeItem(at: index, from: sessionID)
+            model.loadCurrent()
+        } catch {
+            resolved.scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+            model.errorText = "Delete failed: \(error.localizedDescription)"
         }
     }
 

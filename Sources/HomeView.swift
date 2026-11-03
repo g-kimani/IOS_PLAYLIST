@@ -181,5 +181,7 @@ struct SessionCard: View {
         }
         .padding(16)
         .cardStyle(cornerRadius: 22)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .onTapGesture(perform: onView)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 struct QueueItem: Identifiable, Codable, Hashable {
     var id = UUID()
@@ -14,6 +15,24 @@ struct LibraryRoot: Identifiable, Codable {
     var id = UUID()
     var name: String
     var bookmark: Data
+    var weight: Double = 1.0
+
+    enum CodingKeys: String, CodingKey { case id, name, bookmark, weight }
+
+    init(id: UUID = UUID(), name: String, bookmark: Data, weight: Double = 1.0) {
+        self.id = id
+        self.name = name
+        self.bookmark = bookmark
+        self.weight = weight
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try values.decode(String.self, forKey: .name)
+        bookmark = try values.decode(Data.self, forKey: .bookmark)
+        weight = try values.decodeIfPresent(Double.self, forKey: .weight) ?? 1.0
+    }
 }
 
 struct Session: Identifiable, Codable {
@@ -91,8 +110,49 @@ final class SessionStore: ObservableObject {
         save()
     }
 
-    func addItems(_ items: [QueueItem], to id: UUID) {
-        mutate(id) { $0.queue.append(contentsOf: items) }
+    func addItems(_ items: [QueueItem], to id: UUID, at position: Int? = nil) {
+        mutate(id) { session in
+            let insertion = min(max(position ?? session.queue.count, 0), session.queue.count)
+            session.queue.insert(contentsOf: items, at: insertion)
+            if insertion <= session.position && !items.isEmpty { session.position += items.count }
+        }
+    }
+
+    func moveItems(from source: IndexSet, to destination: Int, in id: UUID) {
+        mutate(id) { session in
+            guard !session.queue.isEmpty, session.queue.indices.contains(session.position) else {
+                session.queue.move(fromOffsets: source, toOffset: destination)
+                return
+            }
+            let currentID = session.queue[session.position].id
+            session.queue.move(fromOffsets: source, toOffset: destination)
+            if let newIndex = session.queue.firstIndex(where: { $0.id == currentID }) {
+                session.position = newIndex
+            }
+        }
+    }
+
+    func setRootWeight(_ weight: Double, for rootID: UUID) {
+        guard let index = roots.firstIndex(where: { $0.id == rootID }) else { return }
+        roots[index].weight = min(max(weight, 0), 20)
+        saveRoots()
+    }
+
+    /// Weighted random ordering: items from folders with larger weights tend to
+    /// appear earlier. A zero weight sends that folder's videos to the tail.
+    func probabilityShuffle(for id: UUID) {
+        mutate(id) { session in
+            guard session.queue.count > 1 else { return }
+            let weightByRoot = Dictionary(uniqueKeysWithValues: roots.map { ($0.id, $0.weight) })
+            let shuffled = session.queue.enumerated().map { originalIndex, item -> (Double, Int, QueueItem) in
+                let weight = max(weightByRoot[item.rootID ?? UUID()] ?? 1.0, 0.001)
+                let random = max(Double.random(in: 0.000001...1.0), 0.000001)
+                // Exponential-race key: higher weights get smaller keys more often.
+                return (-log(random) / weight, originalIndex, item)
+            }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }
+            session.queue = shuffled.map { $0.2 }
+            session.position = 0
+        }
     }
 
     func removeItem(at index: Int, from id: UUID) {

@@ -31,6 +31,7 @@ struct SessionView: View {
     @State private var isWorking = false
     @State private var workingText = ""
     @State private var notice: Notice?
+    @State private var insertionPosition: Int?
 
     var body: some View {
         ZStack {
@@ -76,7 +77,8 @@ struct SessionView: View {
         case .addVideos:
             VideoPicker(
                 onPick: { urls in
-                    store.addItems(makeQueueItems(from: urls), to: sessionID)
+                    store.addItems(makeQueueItems(from: urls), to: sessionID, at: insertionPosition)
+                    insertionPosition = nil
                     sheet = nil
                 },
                 onCancel: { sheet = nil }
@@ -85,7 +87,8 @@ struct SessionView: View {
             FolderPicker(
                 onPick: { url in
                     sheet = nil
-                    addFolder(url)
+                    addFolder(url, at: insertionPosition)
+                insertionPosition = nil
                 },
                 onCancel: { sheet = nil }
             )
@@ -118,7 +121,7 @@ struct SessionView: View {
 
     // MARK: - Actions
 
-    private func addFolder(_ url: URL) {
+    private func addFolder(_ url: URL, at position: Int? = nil) {
         isWorking = true
         workingText = "Scanning folder…"
         let sid = sessionID
@@ -140,7 +143,7 @@ struct SessionView: View {
             let items = result.files.map {
                 QueueItem(name: $0.name, bookmark: $0.bookmark, folder: $0.folder, rootID: rootID, relativePath: $0.relativePath)
             }
-            store.addItems(items, to: sid)
+            store.addItems(items, to: sid, at: position)
             let folderCount = Set(items.compactMap { $0.folder }).count
             notice = Notice(
                 title: "Folder added",
@@ -238,15 +241,25 @@ struct SessionView: View {
                 .opacity(session.queue.isEmpty ? 0.4 : 1)
 
                 Menu {
-                    Button {
-                        sheet = .addVideos
-                    } label: {
-                        Label("Add videos", systemImage: "film")
+                    Section("Add to queue") {
+                        Button {
+                            insertionPosition = nil
+                            sheet = .addVideos
+                        } label: { Label("At the end", systemImage: "arrow.down.to.line") }
+                        Button {
+                            insertionPosition = session.position
+                            sheet = .addVideos
+                        } label: { Label("At current position", systemImage: "arrow.turn.down.right") }
                     }
-                    Button {
-                        sheet = .addFolder
-                    } label: {
-                        Label("Add folder", systemImage: "folder")
+                    Section("Add folder") {
+                        Button {
+                            insertionPosition = nil
+                            sheet = .addFolder
+                        } label: { Label("At the end", systemImage: "folder") }
+                        Button {
+                            insertionPosition = session.position
+                            sheet = .addFolder
+                        } label: { Label("At current position", systemImage: "folder.badge.plus") }
                     }
                 } label: {
                     CircleIcon(systemName: "plus", size: 50)
@@ -285,34 +298,30 @@ struct SessionView: View {
     }
 
     private func queueList(_ session: Session) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
-                        QueueRow(
-                            index: index,
-                            item: item,
-                            isCurrent: index == session.position,
-                            isPast: index < session.position,
-                            showDelete: true,
-                            onTap: {
-                                store.setPosition(index, for: session.id)
-                                coordinator.play(session.id)
-                            },
-                            onDelete: {
-                                store.removeItem(at: index, from: session.id)
-                            }
-                        )
-                        .id(item.id)
-                    }
-                }
-                .padding(.bottom, 24)
+        List {
+            ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
+                QueueRow(
+                    index: index,
+                    item: item,
+                    isCurrent: index == session.position,
+                    isPast: index < session.position,
+                    showDelete: true,
+                    onTap: {
+                        store.setPosition(index, for: session.id)
+                        coordinator.play(session.id)
+                    },
+                    onDelete: { store.removeItem(at: index, from: session.id) }
+                )
+                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                .listRowBackground(Color.clear)
             }
-            .onAppear {
-                if session.queue.indices.contains(session.position) {
-                    proxy.scrollTo(session.queue[session.position].id, anchor: .center)
-                }
+            .onMove { source, destination in
+                store.moveItems(from: source, to: destination, in: session.id)
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
+        .environment(\.editMode, .constant(.active))
     }
 }
