@@ -67,6 +67,10 @@ enum PanelKind {
     case queue, folders
 }
 
+enum FolderTab {
+    case weights, progress
+}
+
 enum HUDKind: Equatable {
     case brightness, volume, seekBack, seekForward, play, pause
     case message(String)
@@ -106,6 +110,7 @@ struct PlayerView: View {
 
     @State private var showOverlay = false
     @State private var panel: PanelKind?
+    @State private var folderTab: FolderTab = .weights
     @State private var scrubbing = false
     @State private var scrubValue: Double = 0
     @State private var wasPlayingBeforeScrub = false
@@ -622,41 +627,115 @@ struct PlayerView: View {
     }
 
     private func folderContent(_ session: Session) -> some View {
-        let folders = session.folderSummaries
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Text("Favourite folders")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
                 Spacer()
-                // Sets every folder back to weight 1.
-                IconButton(systemName: "arrow.counterclockwise", size: 34) {
-                    store.resetWeights(for: model.sessionID)
+                if folderTab == .weights {
+                    // Sets every folder back to weight 1.
+                    IconButton(systemName: "arrow.counterclockwise", size: 34) {
+                        store.resetWeights(for: model.sessionID)
+                    }
                 }
                 IconButton(systemName: "xmark", size: 34) { closePanel() }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
 
-            if folders.isEmpty {
-                Text("None of the videos in this queue are in a subfolder yet. Use Add folder or Relink on the session page to pick up subfolders.")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.6))
-                    .multilineTextAlignment(.center)
-                    .padding(24)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(folders) { folder in
-                            folderRow(folder, in: session)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 16)
-                }
+            Picker("View", selection: $folderTab) {
+                Text("Weights").tag(FolderTab.weights)
+                Text("Progress").tag(FolderTab.progress)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+
+            switch folderTab {
+            case .weights:
+                weightsList(session)
+            case .progress:
+                progressList(session)
             }
         }
+    }
+
+    @ViewBuilder
+    private func weightsList(_ session: Session) -> some View {
+        let folders = session.folderSummaries
+        if folders.isEmpty {
+            noFoldersMessage
+            Spacer()
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(folders) { folder in
+                        folderRow(folder, in: session)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 16)
+            }
+        }
+    }
+
+    private var noFoldersMessage: some View {
+        Text("None of the videos in this queue are in a subfolder yet. Use Add folder or Relink on the session page to pick up subfolders.")
+            .font(.subheadline)
+            .foregroundColor(.white.opacity(0.6))
+            .multilineTextAlignment(.center)
+            .padding(24)
+    }
+
+    @ViewBuilder
+    private func progressList(_ session: Session) -> some View {
+        let rows = session.folderProgress
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                progressCard(
+                    title: "Whole queue",
+                    watched: min(session.position, session.queue.count),
+                    remaining: max(session.queue.count - session.position, 0)
+                )
+                ForEach(rows) { row in
+                    progressCard(title: row.name, watched: row.watched, remaining: row.remaining)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 16)
+        }
+    }
+
+    private func progressCard(title: String, watched: Int, remaining: Int) -> some View {
+        let total = watched + remaining
+        let fraction = total == 0 ? 0 : CGFloat(watched) / CGFloat(total)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Spacer()
+                Badge(text: "\(watched) / \(total)")
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.10))
+                    Capsule().fill(Theme.gradient)
+                        .frame(width: geo.size.width * fraction)
+                }
+            }
+            .frame(height: 5)
+            HStack(spacing: 14) {
+                Label("\(watched) watched", systemImage: "checkmark.circle.fill")
+                Label("\(remaining) left", systemImage: "hourglass")
+            }
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.7))
+        }
+        .padding(12)
+        .cardStyle(cornerRadius: 14)
     }
 
     private func folderRow(_ folder: FolderSummary, in session: Session) -> some View {

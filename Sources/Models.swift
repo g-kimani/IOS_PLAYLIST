@@ -53,6 +53,42 @@ extension Session {
     }
 }
 
+struct FolderProgress: Identifiable {
+    let name: String
+    let watched: Int
+    let remaining: Int
+    var id: String { name }
+}
+
+extension Session {
+    /// Watched = videos before the current position. Remaining = the current video and everything after it.
+    /// Videos that aren't in a subfolder are grouped at the end as "No subfolder".
+    var folderProgress: [FolderProgress] {
+        var watched: [String: Int] = [:]
+        var remaining: [String: Int] = [:]
+        var noFolderWatched = 0
+        var noFolderRemaining = 0
+
+        for (index, item) in queue.enumerated() {
+            let isWatched = index < position
+            if let f = item.folder {
+                if isWatched { watched[f, default: 0] += 1 } else { remaining[f, default: 0] += 1 }
+            } else {
+                if isWatched { noFolderWatched += 1 } else { noFolderRemaining += 1 }
+            }
+        }
+
+        var rows = Set(watched.keys).union(remaining.keys)
+            .map { FolderProgress(name: $0, watched: watched[$0] ?? 0, remaining: remaining[$0] ?? 0) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        if noFolderWatched + noFolderRemaining > 0 {
+            rows.append(FolderProgress(name: "No subfolder", watched: noFolderWatched, remaining: noFolderRemaining))
+        }
+        return rows
+    }
+}
+
 enum AddPlacement {
     case end
     case afterCurrent
