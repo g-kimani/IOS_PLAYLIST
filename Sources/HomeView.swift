@@ -172,7 +172,6 @@ struct SessionCard: View {
                     .font(.subheadline.monospacedDigit())
                     .foregroundColor(.white.opacity(0.75))
                 Spacer()
-                IconButton(systemName: "eye", size: 40, action: onView)
                 IconButton(systemName: "xmark", size: 40, tint: Theme.danger, action: onDelete)
                 IconButton(systemName: "play.fill", size: 40, filled: true, action: onPlay)
                     .opacity(session.queue.isEmpty ? 0.4 : 1)

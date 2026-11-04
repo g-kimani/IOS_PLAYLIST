@@ -171,3 +171,45 @@ struct QueueRow: View {
         .opacity(isPast ? 0.45 : 1)
     }
 }
+
+/// Round button whose content is any view (used for the folder + heart icon).
+struct CircleButton<Content: View>: View {
+    var size: CGFloat
+    let action: () -> Void
+    let content: () -> Content
+
+    init(size: CGFloat = 44, action: @escaping () -> Void, @ViewBuilder content: @escaping () -> Content) {
+        self.size = size
+        self.action = action
+        self.content = content
+    }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+                Circle().stroke(Color.white.opacity(0.14), lineWidth: 1)
+                content()
+            }
+            .frame(width: size, height: size)
+            .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle())
+    }
+}
+
+struct FolderHeartIcon: View {
+    var size: CGFloat = 18
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "folder.fill")
+                .font(.system(size: size, weight: .semibold))
+                .foregroundColor(.white)
+            Image(systemName: "heart.fill")
+                .font(.system(size: size * 0.42, weight: .bold))
+                .foregroundColor(Theme.accent2)
+                .offset(y: size * 0.06)
+        }
+    }
+}

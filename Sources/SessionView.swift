@@ -1,12 +1,15 @@
 import SwiftUI
 
 enum SessionSheet: Identifiable {
-    case addVideos, addFolder, relink, share(URL)
+    case addVideos(AddPlacement)
+    case addFolder(AddPlacement)
+    case relink
+    case share(URL)
 
     var id: String {
         switch self {
-        case .addVideos: return "addVideos"
-        case .addFolder: return "addFolder"
+        case .addVideos(let p): return "addVideos-\(p)"
+        case .addFolder(let p): return "addFolder-\(p)"
         case .relink: return "relink"
         case .share(let url): return "share-\(url.absoluteString)"
         }
@@ -31,7 +34,6 @@ struct SessionView: View {
     @State private var isWorking = false
     @State private var workingText = ""
     @State private var notice: Notice?
-    @State private var insertionPosition: Int?
 
     var body: some View {
         ZStack {
@@ -74,21 +76,19 @@ struct SessionView: View {
     @ViewBuilder
     private func sheetContent(_ active: SessionSheet) -> some View {
         switch active {
-        case .addVideos:
+        case .addVideos(let placement):
             VideoPicker(
                 onPick: { urls in
-                    store.addItems(makeQueueItems(from: urls), to: sessionID, at: insertionPosition)
-                    insertionPosition = nil
+                    store.addItems(makeQueueItems(from: urls), to: sessionID, placement: placement)
                     sheet = nil
                 },
                 onCancel: { sheet = nil }
             )
-        case .addFolder:
+        case .addFolder(let placement):
             FolderPicker(
                 onPick: { url in
                     sheet = nil
-                    addFolder(url, at: insertionPosition)
-                insertionPosition = nil
+                    addFolder(url, placement: placement)
                 },
                 onCancel: { sheet = nil }
             )
@@ -121,7 +121,7 @@ struct SessionView: View {
 
     // MARK: - Actions
 
-    private func addFolder(_ url: URL, at position: Int? = nil) {
+    private func addFolder(_ url: URL, placement: AddPlacement) {
         isWorking = true
         workingText = "Scanning folder…"
         let sid = sessionID
@@ -143,11 +143,12 @@ struct SessionView: View {
             let items = result.files.map {
                 QueueItem(name: $0.name, bookmark: $0.bookmark, folder: $0.folder, rootID: rootID, relativePath: $0.relativePath)
             }
-            store.addItems(items, to: sid, at: position)
+            store.addItems(items, to: sid, placement: placement)
             let folderCount = Set(items.compactMap { $0.folder }).count
+            let where_ = placement == .end ? "to the end of the queue" : "right after the current video"
             notice = Notice(
                 title: "Folder added",
-                message: "Added \(items.count) videos to the end of the queue (\(folderCount) subfolders)."
+                message: "Added \(items.count) videos \(where_) (\(folderCount) subfolders)."
             )
         }
     }
@@ -240,26 +241,31 @@ struct SessionView: View {
                 .disabled(session.queue.isEmpty)
                 .opacity(session.queue.isEmpty ? 0.4 : 1)
 
+                // Choose where the new videos go, then pick videos or a folder.
                 Menu {
-                    Section("Add to queue") {
+                    Section("Add to end") {
                         Button {
-                            insertionPosition = nil
-                            sheet = .addVideos
-                        } label: { Label("At the end", systemImage: "arrow.down.to.line") }
+                            sheet = .addVideos(.end)
+                        } label: {
+                            Label("Videos", systemImage: "film")
+                        }
                         Button {
-                            insertionPosition = session.position
-                            sheet = .addVideos
-                        } label: { Label("At current position", systemImage: "arrow.turn.down.right") }
+                            sheet = .addFolder(.end)
+                        } label: {
+                            Label("Folder", systemImage: "folder")
+                        }
                     }
-                    Section("Add folder") {
+                    Section("Add at current position") {
                         Button {
-                            insertionPosition = nil
-                            sheet = .addFolder
-                        } label: { Label("At the end", systemImage: "folder") }
+                            sheet = .addVideos(.afterCurrent)
+                        } label: {
+                            Label("Videos", systemImage: "film")
+                        }
                         Button {
-                            insertionPosition = session.position
-                            sheet = .addFolder
-                        } label: { Label("At current position", systemImage: "folder.badge.plus") }
+                            sheet = .addFolder(.afterCurrent)
+                        } label: {
+                            Label("Folder", systemImage: "folder")
+                        }
                     }
                 } label: {
                     CircleIcon(systemName: "plus", size: 50)
@@ -267,6 +273,8 @@ struct SessionView: View {
 
                 IconButton(systemName: "trash", size: 50, tint: Theme.danger) { confirmDelete = true }
             }
+
+            folderChips(session)
 
             HStack {
                 Text("QUEUE")
@@ -297,31 +305,81 @@ struct SessionView: View {
         .padding(.top, 8)
     }
 
-    private func queueList(_ session: Session) -> some View {
-        List {
-            ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
-                QueueRow(
-                    index: index,
-                    item: item,
-                    isCurrent: index == session.position,
-                    isPast: index < session.position,
-                    showDelete: true,
-                    onTap: {
-                        store.setPosition(index, for: session.id)
-                        coordinator.play(session.id)
-                    },
-                    onDelete: { store.removeItem(at: index, from: session.id) }
-                )
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                .listRowBackground(Color.clear)
-            }
-            .onMove { source, destination in
-                store.moveItems(from: source, to: destination, in: session.id)
+    /// The subfolders used by this session's queue (with their favourite weight if it isn't 1).
+    @ViewBuilder
+    private func folderChips(_ session: Session) -> some View {
+        let folders = session.folderSummaries
+        if !folders.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("FOLDERS IN THIS SESSION")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundColor(.white.opacity(0.6))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(folders) { folder in
+                            HStack(spacing: 6) {
+                                Image(systemName: "folder.fill").font(.caption2)
+                                Text(folder.name)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Text("\(folder.count)")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.5))
+                                if session.weight(for: folder.name) > 1 {
+                                    Text("\u{00D7}\(session.weight(for: folder.name))")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundColor(Theme.accent2)
+                                }
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                            .overlay(Capsule().stroke(Theme.cardStroke, lineWidth: 1))
+                        }
+                    }
+                }
             }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(Color.clear)
-        .environment(\.editMode, .constant(.active))
+    }
+
+    /// Drag the handle on the right of a row to reorder the queue.
+    private func queueList(_ session: Session) -> some View {
+        ScrollViewReader { proxy in
+            List {
+                ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, item in
+                    QueueRow(
+                        index: index,
+                        item: item,
+                        isCurrent: index == session.position,
+                        isPast: index < session.position,
+                        showDelete: true,
+                        onTap: {
+                            store.setPosition(index, for: session.id)
+                            coordinator.play(session.id)
+                        },
+                        onDelete: {
+                            store.removeItem(at: index, from: session.id)
+                        }
+                    )
+                    .id(item.id)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                }
+                .onMove { source, destination in
+                    store.moveItems(from: source, to: destination, in: session.id)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.editMode, .constant(.active))
+            .onAppear {
+                if session.queue.indices.contains(session.position) {
+                    proxy.scrollTo(session.queue[session.position].id, anchor: .center)
+                }
+            }
+        }
     }
 }

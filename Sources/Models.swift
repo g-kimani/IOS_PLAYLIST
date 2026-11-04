@@ -15,24 +15,6 @@ struct LibraryRoot: Identifiable, Codable {
     var id = UUID()
     var name: String
     var bookmark: Data
-    var weight: Double = 1.0
-
-    enum CodingKeys: String, CodingKey { case id, name, bookmark, weight }
-
-    init(id: UUID = UUID(), name: String, bookmark: Data, weight: Double = 1.0) {
-        self.id = id
-        self.name = name
-        self.bookmark = bookmark
-        self.weight = weight
-    }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        name = try values.decode(String.self, forKey: .name)
-        bookmark = try values.decode(Data.self, forKey: .bookmark)
-        weight = try values.decodeIfPresent(Double.self, forKey: .weight) ?? 1.0
-    }
 }
 
 struct Session: Identifiable, Codable {
@@ -41,10 +23,39 @@ struct Session: Identifiable, Codable {
     var created = Date()
     var queue: [QueueItem] = []
     var position = 0
+    var folderWeights: [String: Int]? = nil   // subfolder name -> weight (1...20); missing means 1
 
     var positionLabel: String {
         queue.isEmpty ? "0 / 0" : "\(position + 1) / \(queue.count)"
     }
+}
+
+struct FolderSummary: Identifiable {
+    let name: String
+    let count: Int
+    var id: String { name }
+}
+
+extension Session {
+    /// Subfolders used by videos in this queue, with how many videos each has.
+    var folderSummaries: [FolderSummary] {
+        var counts: [String: Int] = [:]
+        for item in queue {
+            if let f = item.folder { counts[f, default: 0] += 1 }
+        }
+        return counts
+            .map { FolderSummary(name: $0.key, count: $0.value) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    func weight(for folder: String) -> Int {
+        min(max(folderWeights?[folder] ?? 1, 1), 20)
+    }
+}
+
+enum AddPlacement {
+    case end
+    case afterCurrent
 }
 
 struct RelinkSummary {
@@ -110,48 +121,15 @@ final class SessionStore: ObservableObject {
         save()
     }
 
-    func addItems(_ items: [QueueItem], to id: UUID, at position: Int? = nil) {
-        mutate(id) { session in
-            let insertion = min(max(position ?? session.queue.count, 0), session.queue.count)
-            session.queue.insert(contentsOf: items, at: insertion)
-            if insertion <= session.position && !items.isEmpty { session.position += items.count }
-        }
-    }
-
-    func moveItems(from source: IndexSet, to destination: Int, in id: UUID) {
-        mutate(id) { session in
-            guard !session.queue.isEmpty, session.queue.indices.contains(session.position) else {
-                session.queue.move(fromOffsets: source, toOffset: destination)
-                return
+    func addItems(_ items: [QueueItem], to id: UUID, placement: AddPlacement = .end) {
+        mutate(id) { s in
+            switch placement {
+            case .end:
+                s.queue.append(contentsOf: items)
+            case .afterCurrent:
+                let at = s.queue.isEmpty ? 0 : min(s.position + 1, s.queue.count)
+                s.queue.insert(contentsOf: items, at: at)
             }
-            let currentID = session.queue[session.position].id
-            session.queue.move(fromOffsets: source, toOffset: destination)
-            if let newIndex = session.queue.firstIndex(where: { $0.id == currentID }) {
-                session.position = newIndex
-            }
-        }
-    }
-
-    func setRootWeight(_ weight: Double, for rootID: UUID) {
-        guard let index = roots.firstIndex(where: { $0.id == rootID }) else { return }
-        roots[index].weight = min(max(weight, 0), 20)
-        saveRoots()
-    }
-
-    /// Weighted random ordering: items from folders with larger weights tend to
-    /// appear earlier. A zero weight sends that folder's videos to the tail.
-    func probabilityShuffle(for id: UUID) {
-        mutate(id) { session in
-            guard session.queue.count > 1 else { return }
-            let weightByRoot = Dictionary(uniqueKeysWithValues: roots.map { ($0.id, $0.weight) })
-            let shuffled = session.queue.enumerated().map { originalIndex, item -> (Double, Int, QueueItem) in
-                let weight = max(weightByRoot[item.rootID ?? UUID()] ?? 1.0, 0.001)
-                let random = max(Double.random(in: 0.000001...1.0), 0.000001)
-                // Exponential-race key: higher weights get smaller keys more often.
-                return (-log(random) / weight, originalIndex, item)
-            }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }
-            session.queue = shuffled.map { $0.2 }
-            session.position = 0
         }
     }
 
@@ -164,6 +142,38 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Removes the given item and any other queue entries pointing at the same file
+    /// (used after a video is deleted from disk). Position keeps pointing at the next video.
+    func removeItems(sameFileAs item: QueueItem, from id: UUID) {
+        mutate(id) { s in
+            func matches(_ other: QueueItem) -> Bool {
+                if other.id == item.id { return true }
+                if let r = item.rootID, let p = item.relativePath {
+                    return other.rootID == r && other.relativePath == p
+                }
+                return false
+            }
+            var removedBeforePosition = 0
+            for i in s.queue.indices where i < s.position && matches(s.queue[i]) {
+                removedBeforePosition += 1
+            }
+            s.queue.removeAll(where: matches)
+            s.position = max(0, s.position - removedBeforePosition)
+            s.position = min(s.position, max(s.queue.count - 1, 0))
+        }
+    }
+
+    /// Drag-to-reorder. The current position follows the video that is playing.
+    func moveItems(from source: IndexSet, to destination: Int, in id: UUID) {
+        mutate(id) { s in
+            let currentID = s.queue.indices.contains(s.position) ? s.queue[s.position].id : nil
+            s.queue.move(fromOffsets: source, toOffset: destination)
+            if let currentID = currentID, let i = s.queue.firstIndex(where: { $0.id == currentID }) {
+                s.position = i
+            }
+        }
+    }
+
     func setPosition(_ position: Int, for id: UUID) {
         mutate(id) { s in
             guard s.queue.indices.contains(position) else { return }
@@ -171,19 +181,60 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Shuffles the queue from the current position onward, including the current video,
-    /// and guarantees a different video lands in the current slot. Watched videos stay put.
+    // MARK: - Favourite folders & weighted shuffle
+
+    func setWeight(_ weight: Int, folder: String, for id: UUID) {
+        mutate(id) { s in
+            var w = s.folderWeights ?? [:]
+            let clamped = min(max(weight, 1), 20)
+            if clamped == 1 {
+                w.removeValue(forKey: folder)
+            } else {
+                w[folder] = clamped
+            }
+            s.folderWeights = w.isEmpty ? nil : w
+        }
+    }
+
+    func resetWeights(for id: UUID) {
+        mutate(id) { s in s.folderWeights = nil }
+    }
+
+    /// Shuffles the queue from the current position onward (current video included).
+    /// Each video's chance of landing earlier is proportional to its folder's weight,
+    /// and a different video than the current one always ends up in the current slot.
     func shuffleFromCurrent(for id: UUID) {
         mutate(id) { s in
             guard s.queue.count - s.position > 1 else { return }
+            let weights = s.folderWeights ?? [:]
             let currentID = s.queue[s.position].id
-            var tail = Array(s.queue[s.position...])
-            tail.shuffle()
-            if tail[0].id == currentID {
-                tail.swapAt(0, Int.random(in: 1..<tail.count))
+            let tail = Array(s.queue[s.position...])
+
+            var ordered = SessionStore.weightedOrder(tail, weights: weights)
+            var attempts = 0
+            while ordered[0].id == currentID && attempts < 25 {
+                ordered = SessionStore.weightedOrder(tail, weights: weights)
+                attempts += 1
             }
-            s.queue.replaceSubrange(s.position..<s.queue.count, with: tail)
+            if ordered[0].id == currentID {
+                ordered.swapAt(0, Int.random(in: 1..<ordered.count))
+            }
+            s.queue.replaceSubrange(s.position..<s.queue.count, with: ordered)
         }
+    }
+
+    /// Weighted random order without replacement: each item gets the key -ln(u) / weight
+    /// (u uniform in (0,1)) and items are sorted ascending. Equivalent to repeatedly
+    /// drawing the next video with probability proportional to its weight.
+    private static func weightedOrder(_ items: [QueueItem], weights: [String: Int]) -> [QueueItem] {
+        items
+            .map { item -> (QueueItem, Double) in
+                let w = Double(min(max(weights[item.folder ?? ""] ?? 1, 1), 20))
+                let u = Double.random(in: Double.leastNonzeroMagnitude..<1)
+                return (item, -log(u) / w)
+            }
+            .sorted { $0.1 < $1.1 }
+            .map { $0.0 }
     }
 
     func updateBookmark(_ data: Data, itemID: UUID, in id: UUID) {
