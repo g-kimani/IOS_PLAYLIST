@@ -72,7 +72,8 @@ enum FolderTab {
 }
 
 enum HUDKind: Equatable {
-    case brightness, volume, seekBack, seekForward, play, pause
+    case brightness, volume, play, pause
+    case seekBack(Int), seekForward(Int)
     case message(String)
 }
 
@@ -121,11 +122,23 @@ struct PlayerView: View {
     @State private var dragActive = false
     @State private var dragStart: Double = 0
     @State private var confirmDeleteFile = false
+    @State private var zoom: CGFloat = 1
+    @State private var zoomBase: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @State private var panBase: CGSize = .zero
+    @State private var panActive = false
+    @State private var isPinching = false
+    @State private var seekAccum = 0
+    @State private var lastSeekDirection = 0
+    @State private var lastSeekTime = Date.distantPast
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PlayerLayerView(model: model).ignoresSafeArea()
+            PlayerLayerView(model: model)
+                .ignoresSafeArea()
+                .scaleEffect(zoom)
+                .offset(pan)
 
             // Touch controls: three regions across the full screen.
             GeometryReader { geo in
@@ -159,6 +172,7 @@ struct PlayerView: View {
             UIApplication.shared.isIdleTimerDisabled = false
             coordinator.coverDismissed()
         }
+        .onChange(of: model.loadedItemID) { _ in resetZoom() }
         .onChange(of: model.notice) { message in
             if let message = message {
                 showHUD(.message(message))
@@ -177,13 +191,33 @@ struct PlayerView: View {
 
     private func touchLayer(size: CGSize) -> some View {
         HStack(spacing: 0) {
-            touchRegion(.left, height: size.height).frame(width: size.width * 0.32)
-            touchRegion(.center, height: size.height).frame(width: size.width * 0.36)
-            touchRegion(.right, height: size.height).frame(width: size.width * 0.32)
+            touchRegion(.left, size: size).frame(width: size.width * 0.32)
+            touchRegion(.center, size: size).frame(width: size.width * 0.36)
+            touchRegion(.right, size: size).frame(width: size.width * 0.32)
         }
+        // Pinch anywhere on the video to zoom; one finger pans while zoomed in.
+        .simultaneousGesture(
+            MagnificationGesture()
+                .onChanged { value in
+                    isPinching = true
+                    zoom = min(max(zoomBase * value, 1), 5)
+                    pan = clampedPan(pan, size: size)
+                    showHUD(.message(String(format: "Zoom %.1fx", Double(zoom))))
+                }
+                .onEnded { _ in
+                    isPinching = false
+                    if zoom < 1.05 {
+                        resetZoom()
+                    } else {
+                        zoomBase = zoom
+                        pan = clampedPan(pan, size: size)
+                        panBase = pan
+                    }
+                }
+        )
     }
 
-    private func touchRegion(_ region: TouchRegion, height: CGFloat) -> some View {
+    private func touchRegion(_ region: TouchRegion, size: CGSize) -> some View {
         Color.clear
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { doubleTap(region) }
@@ -191,22 +225,30 @@ struct PlayerView: View {
             .gesture(
                 DragGesture(minimumDistance: 10)
                     .onChanged { value in
-                        drag(region, translation: value.translation, height: height)
+                        drag(region, translation: value.translation, size: size)
                     }
                     .onEnded { _ in
                         dragActive = false
+                        panActive = false
                     }
             )
     }
 
     private func doubleTap(_ region: TouchRegion) {
         switch region {
-        case .left:
-            model.seek(by: -5)
-            showHUD(.seekBack)
-        case .right:
-            model.seek(by: 5)
-            showHUD(.seekForward)
+        case .left, .right:
+            // Quick repeated double taps in the same direction add up: 5s, 10s, 15s...
+            let direction = region == .left ? -1 : 1
+            let now = Date()
+            if direction == lastSeekDirection && now.timeIntervalSince(lastSeekTime) < 0.85 {
+                seekAccum += 5
+            } else {
+                seekAccum = 5
+            }
+            lastSeekDirection = direction
+            lastSeekTime = now
+            model.seek(by: Double(direction * 5))
+            showHUD(direction < 0 ? .seekBack(seekAccum) : .seekForward(seekAccum))
         case .center:
             let willPlay = !model.isPlaying
             model.togglePlay()
@@ -216,14 +258,29 @@ struct PlayerView: View {
 
     /// Vertical swipe: left side = screen brightness, right side = volume.
     /// A swipe over ~80% of the screen height covers the full range, so movement is very fine-grained.
-    private func drag(_ region: TouchRegion, translation: CGSize, height: CGFloat) {
+    /// While zoomed in, one finger pans the picture instead.
+    private func drag(_ region: TouchRegion, translation: CGSize, size: CGSize) {
+        guard !isPinching else { return }
+
+        if zoom > 1.01 {
+            if !panActive {
+                panActive = true
+                panBase = pan
+            }
+            pan = clampedPan(
+                CGSize(width: panBase.width + translation.width, height: panBase.height + translation.height),
+                size: size
+            )
+            return
+        }
+
         guard region != .center else { return }
         if !dragActive {
             guard abs(translation.height) > abs(translation.width) else { return }
             dragActive = true
             dragStart = region == .left ? Double(UIScreen.main.brightness) : Double(SystemVolume.shared.current)
         }
-        let delta = -Double(translation.height) / Double(max(height * 0.8, 1))
+        let delta = -Double(translation.height) / Double(max(size.height * 0.8, 1))
         let value = min(max(dragStart + delta, 0), 1)
         if region == .left {
             UIScreen.main.brightness = CGFloat(value)
@@ -254,17 +311,17 @@ struct PlayerView: View {
             case .brightness:
                 levelHUD(icon: "sun.max.fill", value: hud.value)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .padding(.leading, 24)
+                    .padding(.leading, 84)
             case .volume:
                 levelHUD(icon: volumeIcon(hud.value), value: hud.value)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                     .padding(.trailing, 24)
-            case .seekBack:
-                flashHUD(icon: "gobackward.5", text: "-5s")
+            case .seekBack(let seconds):
+                flashHUD(icon: "gobackward", text: "-\(seconds)s")
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .padding(.leading, 56)
-            case .seekForward:
-                flashHUD(icon: "goforward.5", text: "+5s")
+                    .padding(.leading, 100)
+            case .seekForward(let seconds):
+                flashHUD(icon: "goforward", text: "+\(seconds)s")
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                     .padding(.trailing, 56)
             case .play:
@@ -357,8 +414,8 @@ struct PlayerView: View {
                             .padding(.horizontal, 64)
                     }
                     HStack {
-                        Spacer()
                         sideButtons
+                        Spacer()
                     }
                 }
                 .frame(maxHeight: .infinity)
@@ -372,10 +429,8 @@ struct PlayerView: View {
     private func topBar(portrait: Bool) -> some View {
         let sideWidth: CGFloat = portrait ? 90 : 150
         return HStack(spacing: 8) {
-            IconButton(systemName: "xmark", size: 44, tint: Theme.danger) {
-                coordinator.close()
-            }
-            .frame(width: sideWidth, alignment: .leading)
+            statusInfo(portrait: portrait)
+                .frame(width: sideWidth, alignment: .leading)
 
             Text(titleText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
@@ -384,8 +439,10 @@ struct PlayerView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
 
-            statusInfo(portrait: portrait)
-                .frame(width: sideWidth, alignment: .trailing)
+            IconButton(systemName: "xmark", size: 44, tint: Theme.danger) {
+                coordinator.close()
+            }
+            .frame(width: sideWidth, alignment: .trailing)
         }
     }
 
@@ -401,7 +458,7 @@ struct PlayerView: View {
         }
         return Group {
             if portrait {
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     clock
                     if battery.percent >= 0 { batteryView }
                 }
@@ -494,25 +551,44 @@ struct PlayerView: View {
         }
     }
 
-    /// Shows the current speed; tapping it resets to 1x.
+    /// Shows the current speed. Tap resets this video to 1x; hold to lock or unlock the speed
+    /// so it carries over to other videos (videos under a minute still play at 1x).
     private var rateButton: some View {
-        Button {
-            model.resetRate()
-            poke()
-        } label: {
-            Text(rateText)
-                .font(.caption.monospacedDigit().weight(.bold))
-                .foregroundColor(.white)
-                .frame(minWidth: 44, minHeight: 30)
-                .padding(.horizontal, 6)
-                .background(Capsule().fill(Color.white.opacity(0.14)))
-                .contentShape(Capsule())
+        let locked = model.lockedRate != nil
+        return HStack(spacing: 4) {
+            if locked {
+                Image(systemName: "lock.fill").font(.system(size: 10, weight: .bold))
+            }
+            Text(rateText).font(.caption.monospacedDigit().weight(.bold))
         }
-        .buttonStyle(PressableStyle())
+        .foregroundColor(.white)
+        .frame(minWidth: 48, minHeight: 36)
+        .padding(.horizontal, 6)
+        .background(Capsule().fill(locked ? Theme.accent.opacity(0.6) : Color.white.opacity(0.14)))
+        .contentShape(Capsule())
+        .onTapGesture {
+            model.resetRate()
+            showHUD(.message("Speed reset to 1x"))
+            poke()
+        }
+        .onLongPressGesture(minimumDuration: 0.5) {
+            let nowLocked = model.toggleRateLock()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            if nowLocked, let r = model.lockedRate {
+                showHUD(.message("Speed locked at \(speedString(r))"))
+            } else {
+                showHUD(.message("Speed unlocked"))
+            }
+            poke()
+        }
     }
 
     private var rateText: String {
-        let r = Double(model.rate)
+        speedString(model.rate)
+    }
+
+    private func speedString(_ rate: Float) -> String {
+        let r = Double(rate)
         let text = r == r.rounded() ? String(format: "%.1f", r) : String(format: "%g", r)
         return text + "x"
     }
@@ -548,29 +624,41 @@ struct PlayerView: View {
             )
             .tint(Theme.accent)
 
-            // Time left by default; tap to switch to the total length.
-            Button {
-                showRemaining.toggle()
-                poke()
-            } label: {
-                Text(showRemaining
-                     ? "-" + format(max(model.duration - displayed, 0))
-                     : format(model.duration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(.white)
-                    .frame(minWidth: 56, minHeight: 36, alignment: .trailing)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            remainingLabel(displayed: displayed)
         }
         .foregroundColor(.white)
+    }
+
+    /// Time left (tap for total length) and, when the speed isn't 1x, the same time at the current speed.
+    private func remainingLabel(displayed: Double) -> some View {
+        let value = showRemaining ? max(model.duration - displayed, 0) : model.duration
+        let speed = Double(model.rate)
+        let sign = showRemaining ? "-" : ""
+        return Button {
+            showRemaining.toggle()
+            poke()
+        } label: {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(sign + format(value))
+                    .font(.caption.monospacedDigit())
+                if abs(speed - 1.0) > 0.001 {
+                    Text(sign + format(value / speed))
+                        .font(.caption2.monospacedDigit().weight(.bold))
+                        .foregroundColor(Theme.accent2)
+                }
+            }
+            .foregroundColor(.white)
+            .frame(minWidth: 56, minHeight: 36, alignment: .trailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Side panels (queue / favourite folders)
 
     @ViewBuilder
     private func panelView(_ kind: PanelKind, portrait: Bool, size: CGSize) -> some View {
-        ZStack(alignment: portrait ? .bottom : .trailing) {
+        ZStack(alignment: portrait ? .bottom : .leading) {
             Color.black.opacity(0.4)
                 .ignoresSafeArea()
                 .onTapGesture { closePanel() }
@@ -739,33 +827,35 @@ struct PlayerView: View {
     }
 
     private func folderRow(_ folder: FolderSummary, in session: Session) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(folder.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                Text("\(folder.count)")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.5))
-                Spacer()
-                Badge(text: "\(session.weight(for: folder.name))")
-            }
-            Slider(
-                value: Binding(
-                    get: { Double(session.weight(for: folder.name)) },
-                    set: { store.setWeight(Int($0.rounded()), folder: folder.name, for: model.sessionID) }
-                ),
-                in: 1...20,
-                step: 1
-            )
-            .tint(Theme.accent2)
+        let remaining = session.folderProgress.first(where: { $0.name == folder.name })?.remaining ?? 0
+        return FolderWeightRow(
+            name: folder.name,
+            total: folder.count,
+            remaining: remaining,
+            weight: session.weight(for: folder.name)
+        ) { newValue in
+            store.setWeight(newValue, folder: folder.name, for: model.sessionID)
         }
-        .padding(12)
-        .cardStyle(cornerRadius: 14)
     }
 
     // MARK: - Helpers
+
+    private func resetZoom() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            zoom = 1
+            zoomBase = 1
+            pan = .zero
+            panBase = .zero
+        }
+    }
+
+    /// Keeps the zoomed picture from being dragged completely out of view.
+    private func clampedPan(_ value: CGSize, size: CGSize) -> CGSize {
+        let maxX = size.width * (zoom - 1) / 2
+        let maxY = size.height * (zoom - 1) / 2
+        return CGSize(width: min(max(value.width, -maxX), maxX),
+                      height: min(max(value.height, -maxY), maxY))
+    }
 
     private var currentName: String {
         guard let s = store.session(model.sessionID), s.queue.indices.contains(s.position) else { return "" }
@@ -810,5 +900,86 @@ struct PlayerView: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, sec)
             : String(format: "%d:%02d", m, sec)
+    }
+}
+
+
+/// One favourite-folder row. The slider keeps its value locally while you drag and only saves when you
+/// let go, and it takes hold of the touch immediately so the scroll view behind it can't make it feel sticky.
+struct FolderWeightRow: View {
+    let name: String
+    let total: Int
+    let remaining: Int
+    let weight: Int
+    let onCommit: (Int) -> Void
+
+    @State private var value: Int
+    @State private var dragging = false
+
+    init(name: String, total: Int, remaining: Int, weight: Int, onCommit: @escaping (Int) -> Void) {
+        self.name = name
+        self.total = total
+        self.remaining = remaining
+        self.weight = weight
+        self.onCommit = onCommit
+        _value = State(initialValue: weight)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Spacer()
+                Badge(text: "\(value)")
+            }
+            Text("\(remaining) left of \(total)")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.55))
+            slider
+        }
+        .padding(12)
+        .cardStyle(cornerRadius: 14)
+        .onChange(of: weight) { newValue in
+            if !dragging { value = newValue }
+        }
+    }
+
+    private var slider: some View {
+        GeometryReader { geo in
+            let thumb: CGFloat = 26
+            let travel = max(geo.size.width - thumb, 1)
+            let fraction = CGFloat(value - 1) / 19
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.12)).frame(height: 6)
+                Capsule().fill(Theme.gradient)
+                    .frame(width: thumb / 2 + travel * fraction, height: 6)
+                Circle().fill(Color.white)
+                    .frame(width: thumb, height: thumb)
+                    .shadow(color: Color.black.opacity(0.3), radius: 2)
+                    .offset(x: travel * fraction)
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        dragging = true
+                        let f = min(max((drag.location.x - thumb / 2) / travel, 0), 1)
+                        let newValue = 1 + Int((f * 19).rounded())
+                        if newValue != value {
+                            value = newValue
+                            UISelectionFeedbackGenerator().selectionChanged()
+                        }
+                    }
+                    .onEnded { _ in
+                        dragging = false
+                        onCommit(value)
+                    }
+            )
+        }
+        .frame(height: 32)
     }
 }

@@ -125,6 +125,9 @@ final class SessionStore: ObservableObject {
     private var rootsURL: URL { documents.appendingPathComponent("roots.json") }
     private var backupDir: URL { documents.appendingPathComponent("Backups", isDirectory: true) }
 
+    private var progressMap: [String: Double] = [:]   // queue item id -> seconds watched
+    private var progressURL: URL { documents.appendingPathComponent("progress.json") }
+
     init() {
         load()
     }
@@ -281,6 +284,27 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    // MARK: - Resume points
+
+    /// Where playback stopped in a video (seconds), if it was left part-way through.
+    func progress(for itemID: UUID) -> Double? {
+        progressMap[itemID.uuidString]
+    }
+
+    /// Pass nil to forget the resume point (finished or restarted).
+    func setProgress(_ seconds: Double?, for itemID: UUID) {
+        let key = itemID.uuidString
+        if let seconds = seconds {
+            if progressMap[key] == seconds { return }
+            progressMap[key] = seconds
+        } else if progressMap.removeValue(forKey: key) == nil {
+            return
+        }
+        if let data = try? JSONEncoder().encode(progressMap) {
+            try? data.write(to: progressURL, options: .atomic)
+        }
+    }
+
     // MARK: - Library folders & relinking
 
     /// Registers a library folder (or finds the existing entry for the same folder).
@@ -373,6 +397,10 @@ final class SessionStore: ObservableObject {
         if let data = try? Data(contentsOf: rootsURL),
            let decoded = try? JSONDecoder().decode([LibraryRoot].self, from: data) {
             roots = decoded
+        }
+        if let data = try? Data(contentsOf: progressURL),
+           let decoded = try? JSONDecoder().decode([String: Double].self, from: data) {
+            progressMap = decoded
         }
     }
 

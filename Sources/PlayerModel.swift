@@ -22,6 +22,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     @Published var errorText: String?
     @Published var notice: String?
     @Published var isPiPActive = false
+    @Published var lockedRate: Float?
 
     // Hooks the coordinator uses to react to PiP and deletion events.
     var onPiPWillStart: (() -> Void)?
@@ -29,7 +30,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     var onPiPStopped: (() -> Void)?
     var onQueueEmptied: (() -> Void)?
 
-    private(set) var loadedItemID: UUID?
+    @Published private(set) var loadedItemID: UUID?
 
     private var pip: AVPictureInPictureController?
     private var pipStarting = false
@@ -43,6 +44,10 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     private var isSeeking = false
     private var pendingSeek: Double?
     private var lastNowPlayingSecond = -1
+    private var durationCancellable: AnyCancellable?
+    private var lastProgressSave: Double = 0
+    private var tapSeekTarget: Double?
+    private var tapSeekDate = Date.distantPast
 
     var keepAliveForPiP: Bool { pipStarting || isPiPActive }
 
@@ -50,6 +55,9 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         self.sessionID = sessionID
         self.store = store
         super.init()
+
+        let storedRate = UserDefaults.standard.double(forKey: "lockedRate")
+        lockedRate = storedRate > 0 ? Float(storedRate) : nil
 
         videoView.playerLayer.player = player
         videoView.playerLayer.videoGravity = .resizeAspect
@@ -73,6 +81,9 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             if let d = self.player.currentItem?.duration.seconds, d.isFinite, d > 0 {
                 self.duration = d
             }
+            if abs(self.currentTime - self.lastProgressSave) >= 5 {
+                self.saveProgress()
+            }
             let second = Int(self.currentTime)
             if second != self.lastNowPlayingSecond {
                 self.lastNowPlayingSecond = second
@@ -85,6 +96,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.isPlaying = (status != .paused)
+                if status == .paused { self?.saveProgress() }
                 self?.updateNowPlaying()
             }
 
@@ -93,7 +105,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.next()
+            self?.itemFinished()
         }
 
         // Background play: with the video layer attached iOS pauses playback when the app is
@@ -103,6 +115,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            self?.saveProgress()
             guard let self = self, !self.keepAliveForPiP else { return }
             self.videoView.playerLayer.player = nil
         }
@@ -129,6 +142,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
 
     /// Stops everything. The coordinator calls this when the player is done with.
     func shutdown() {
+        saveProgress()
         onPiPWillStart = nil
         onPiPRestore = nil
         onPiPStopped = nil
@@ -156,6 +170,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         bgObserver = nil
         fgObserver = nil
         statusCancellable = nil
+        durationCancellable = nil
         removeRemoteCommands()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         videoView.removeFromSuperview()
@@ -170,12 +185,14 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     // MARK: - Loading
 
     func loadCurrent(autoplay: Bool = true) {
+        saveProgress()   // remember where we were in the video we're leaving
         accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         accessedURLs = []
         errorText = nil
         currentTime = 0
         duration = 0
-        // Playback speed always starts back at 1x for a new video.
+        durationCancellable = nil
+        // Speed starts back at 1x for a new video (a locked speed is applied once the length is known).
         rate = 1.0
         player.defaultRate = 1.0
 
@@ -186,6 +203,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         }
         let item = session.queue[session.position]
         loadedItemID = item.id
+        lastProgressSave = 0
 
         guard let resolved = FileResolver.resolve(item, store: store) else {
             player.replaceCurrentItem(with: nil)
@@ -197,9 +215,57 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             store.updateBookmark(fresh, itemID: item.id, in: sessionID)
         }
 
-        player.replaceCurrentItem(with: AVPlayerItem(url: resolved.url))
+        let playerItem = AVPlayerItem(url: resolved.url)
+        // Pick up where this video was left off.
+        if let saved = store.progress(for: item.id), saved > 3 {
+            playerItem.seek(to: CMTime(seconds: saved, preferredTimescale: 600),
+                            toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: nil)
+            currentTime = saved
+            lastProgressSave = saved
+        }
+        watchDuration(of: playerItem)
+        player.replaceCurrentItem(with: playerItem)
         if autoplay { play() }
         updateNowPlaying()
+    }
+
+    private func watchDuration(of item: AVPlayerItem) {
+        durationCancellable = item.publisher(for: \.duration)
+            .filter { $0.isNumeric && $0.seconds > 0 }
+            .first()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] time in
+                guard let self = self else { return }
+                self.duration = time.seconds
+                self.applyLockedRate()
+            }
+    }
+
+    /// A locked speed carries over to new videos, except short ones (under a minute) which play at 1x.
+    private func applyLockedRate() {
+        guard let locked = lockedRate, duration >= 60 else { return }
+        rate = locked
+        player.defaultRate = locked
+        if player.timeControlStatus != .paused { player.rate = locked }
+    }
+
+    // MARK: - Resume points
+
+    private func saveProgress() {
+        guard let id = loadedItemID, duration > 0 else { return }
+        let t = currentTime
+        if t > 3 && duration - t > 5 {
+            store.setProgress(t, for: id)
+        } else {
+            store.setProgress(nil, for: id)   // at the very start or the very end: nothing to resume
+        }
+        lastProgressSave = t
+    }
+
+    private func itemFinished() {
+        if let id = loadedItemID { store.setProgress(nil, for: id) }
+        lastProgressSave = 0
+        next()
     }
 
     // MARK: - Transport
@@ -223,13 +289,16 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         }
     }
 
+    /// Within the first 10 seconds this goes to the previous video; later on it restarts the current one.
     func previous() {
         guard let s = session else { return }
-        if s.position > 0 {
+        if currentTime <= 10 && s.position > 0 {
             store.setPosition(s.position - 1, for: sessionID)
             loadCurrent()
         } else {
             seek(to: 0)
+            if let id = loadedItemID { store.setProgress(nil, for: id) }
+            lastProgressSave = 0
         }
     }
 
@@ -248,11 +317,16 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     }
 
     func seek(by delta: Double) {
-        let now = player.currentTime().seconds
-        guard now.isFinite else { return }
-        var target = now + delta
+        var base = player.currentTime().seconds
+        // Quick repeated skips build on the previous target rather than the lagging playhead.
+        if let t = tapSeekTarget, Date().timeIntervalSince(tapSeekDate) < 1.0 { base = t }
+        guard base.isFinite else { return }
+        var target = base + delta
         if duration > 0 { target = min(target, max(duration - 0.1, 0)) }
-        seek(to: max(target, 0))
+        target = max(target, 0)
+        tapSeekTarget = target
+        tapSeekDate = Date()
+        seek(to: target)
     }
 
     func beginScrub() {
@@ -309,6 +383,18 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         if player.timeControlStatus != .paused { player.rate = 1.0 }
     }
 
+    /// Locks the current speed so it carries over to other videos, or unlocks it. Returns true if now locked.
+    func toggleRateLock() -> Bool {
+        if lockedRate != nil {
+            lockedRate = nil
+            UserDefaults.standard.removeObject(forKey: "lockedRate")
+            return false
+        }
+        lockedRate = rate
+        UserDefaults.standard.set(Double(rate), forKey: "lockedRate")
+        return true
+    }
+
     // MARK: - Shuffle
 
     /// Weighted shuffle from the current position (current video included), then jump to
@@ -360,6 +446,8 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         }
 
         store.removeItems(sameFileAs: item, from: sessionID)
+        store.setProgress(nil, for: item.id)
+        loadedItemID = nil
         notice = "Deleted \(item.name)"
         if let updated = session, !updated.queue.isEmpty {
             loadCurrent()
