@@ -432,7 +432,8 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             error: &coordinationError
         ) { url in
             do {
-                try FileManager.default.removeItem(at: url)
+                // Goes to "Recently Deleted" in the Files app instead of being erased.
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
             } catch {
                 deleteError = error
             }
@@ -441,14 +442,14 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         if failure == nil, let ce = coordinationError { failure = ce }
         if let failure = failure {
             loadCurrent()
-            errorText = "Couldn't delete \(item.name): \(failure.localizedDescription)"
+            errorText = "Couldn't move \(item.name) to Recently Deleted: \(failure.localizedDescription)"
             return
         }
 
         store.removeItems(sameFileAs: item, from: sessionID)
         store.setProgress(nil, for: item.id)
         loadedItemID = nil
-        notice = "Deleted \(item.name)"
+        notice = "Moved to Recently Deleted"
         if let updated = session, !updated.queue.isEmpty {
             loadCurrent()
         } else {

@@ -127,7 +127,7 @@ struct PlayerView: View {
     @State private var pan: CGSize = .zero
     @State private var panBase: CGSize = .zero
     @State private var panActive = false
-    @State private var isPinching = false
+    @GestureState private var isPinching = false
     @State private var seekAccum = 0
     @State private var lastSeekDirection = 0
     @State private var lastSeekTime = Date.distantPast
@@ -180,10 +180,10 @@ struct PlayerView: View {
             }
         }
         .alert("Delete this video?", isPresented: $confirmDeleteFile) {
-            Button("Delete from device", role: .destructive) { model.deleteCurrentFromDisk() }
+            Button("Move to Recently Deleted", role: .destructive) { model.deleteCurrentFromDisk() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\u{201C}\(currentName)\u{201D} will be permanently deleted from your device. This can't be undone.")
+            Text("\u{201C}\(currentName)\u{201D} will be moved to Recently Deleted in the Files app, where you can restore it for 30 days.")
         }
     }
 
@@ -198,14 +198,13 @@ struct PlayerView: View {
         // Pinch anywhere on the video to zoom; one finger pans while zoomed in.
         .simultaneousGesture(
             MagnificationGesture()
+                .updating($isPinching) { _, state, _ in state = true }
                 .onChanged { value in
-                    isPinching = true
                     zoom = min(max(zoomBase * value, 1), 5)
                     pan = clampedPan(pan, size: size)
                     showHUD(.message(String(format: "Zoom %.1fx", Double(zoom))))
                 }
                 .onEnded { _ in
-                    isPinching = false
                     if zoom < 1.05 {
                         resetZoom()
                     } else {
@@ -227,9 +226,8 @@ struct PlayerView: View {
                     .onChanged { value in
                         drag(region, translation: value.translation, size: size)
                     }
-                    .onEnded { _ in
-                        dragActive = false
-                        panActive = false
+                    .onEnded { value in
+                        finishDrag(value)
                     }
             )
     }
@@ -256,12 +254,26 @@ struct PlayerView: View {
         }
     }
 
+    /// When a drag ends: a quick swipe down while zoomed in snaps the zoom back to normal.
+    private func finishDrag(_ value: DragGesture.Value) {
+        defer {
+            dragActive = false
+            panActive = false
+        }
+        guard zoom > 1.01 else { return }
+        let dx = value.translation.width
+        let dy = value.translation.height
+        let momentum = value.predictedEndTranslation.height - dy   // how much further a flick would carry
+        if dy > 60 && abs(dy) > abs(dx) * 1.5 && momentum > 120 {
+            resetZoom()
+        }
+    }
+
     /// Vertical swipe: left side = screen brightness, right side = volume.
     /// A swipe over ~80% of the screen height covers the full range, so movement is very fine-grained.
     /// While zoomed in, one finger pans the picture instead.
     private func drag(_ region: TouchRegion, translation: CGSize, size: CGSize) {
-        guard !isPinching else { return }
-
+        // Zoomed in: one finger pans the picture (this also works straight after a pinch).
         if zoom > 1.01 {
             if !panActive {
                 panActive = true
@@ -274,7 +286,7 @@ struct PlayerView: View {
             return
         }
 
-        guard region != .center else { return }
+        guard !isPinching, region != .center else { return }
         if !dragActive {
             guard abs(translation.height) > abs(translation.width) else { return }
             dragActive = true
@@ -485,9 +497,6 @@ struct PlayerView: View {
 
     private var sideButtons: some View {
         VStack(spacing: 8) {
-            CircleButton(size: 40, action: { openPanel(.folders) }) {
-                FolderHeartIcon()
-            }
             IconButton(systemName: "trash", size: 40, tint: Theme.danger) {
                 confirmDeleteFile = true
                 poke()
@@ -504,41 +513,56 @@ struct PlayerView: View {
         }
     }
 
+    private var folderButton: some View {
+        CircleButton(size: 44, action: { openPanel(.folders) }) {
+            FolderHeartIcon()
+        }
+    }
+
     private func bottomBar(portrait: Bool) -> some View {
         VStack(spacing: portrait ? 14 : 6) {
             scrubber
 
             if portrait {
-                // Portrait: transport controls centred on one row,
-                // speed / shuffle / queue on the row below.
+                // Portrait: previous / play / next centred, everything else on the row below.
                 HStack(spacing: 36) {
                     IconButton(systemName: "backward.fill", size: 50) { model.previous(); poke() }
                     playPauseButton(size: 66)
                     IconButton(systemName: "forward.fill", size: 50) { model.next(); poke() }
                 }
                 HStack {
-                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
+                    IconButton(systemName: "shuffle") { model.shuffle(); poke() }
+                    Spacer()
+                    folderButton
                     Spacer()
                     rateButton
                     Spacer()
-                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
+                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
                     Spacer()
-                    IconButton(systemName: "shuffle") { model.shuffle(); poke() }
+                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
                     Spacer()
                     IconButton(systemName: "list.bullet") { openPanel(.queue) }
                 }
             } else {
-                // Landscape: everything on a single row.
+                // Landscape: play / pause in the middle with four buttons either side.
                 HStack(spacing: 12) {
-                    playPauseButton(size: 52)
-                    IconButton(systemName: "backward.fill") { model.previous(); poke() }
-                    IconButton(systemName: "forward.fill") { model.next(); poke() }
-                    Spacer()
-                    rateButton
-                    IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
-                    IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
-                    IconButton(systemName: "shuffle") { model.shuffle(); poke() }
-                    IconButton(systemName: "list.bullet") { openPanel(.queue) }
+                    HStack(spacing: 10) {
+                        IconButton(systemName: "shuffle") { model.shuffle(); poke() }
+                        IconButton(systemName: "backward.fill") { model.previous(); poke() }
+                        IconButton(systemName: "forward.fill") { model.next(); poke() }
+                        folderButton
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    playPauseButton(size: 56)
+
+                    HStack(spacing: 10) {
+                        rateButton
+                        IconButton(systemName: "tortoise.fill") { model.changeRate(by: -0.25); poke() }
+                        IconButton(systemName: "hare.fill") { model.changeRate(by: 0.25); poke() }
+                        IconButton(systemName: "list.bullet") { openPanel(.queue) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
         }

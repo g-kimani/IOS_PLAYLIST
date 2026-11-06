@@ -284,6 +284,28 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    // MARK: - Import
+
+    /// Creates a session from filenames (in order), linking each one to a file found in a library folder.
+    /// Returns nil (and creates nothing) if none of the names were found.
+    func importSession(name: String, orderedNames: [String], rootID: UUID,
+                       files: [String: [ScannedFile]]) -> (id: UUID, matched: Int, missing: Int)? {
+        var items: [QueueItem] = []
+        var missing = 0
+        for n in orderedNames {
+            guard let match = files[n]?.first else {
+                missing += 1
+                continue
+            }
+            items.append(QueueItem(name: n, bookmark: match.bookmark, folder: match.folder,
+                                   rootID: rootID, relativePath: match.relativePath))
+        }
+        guard !items.isEmpty else { return nil }
+        let id = createSession(name: name)
+        addItems(items, to: id)
+        return (id, items.count, missing)
+    }
+
     // MARK: - Resume points
 
     /// Where playback stopped in a video (seconds), if it was left part-way through.
